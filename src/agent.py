@@ -24,6 +24,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from .tools import TOOL_DEFINITIONS, TOOL_MAP
+from .memory import get_memory
 
 # Load .env
 load_dotenv()
@@ -107,7 +108,10 @@ class AgentLoop:
 
         # Auto-detect from env
         if api_key is None:
-            api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+          if provider == "deepseek":
+              api_key = os.getenv("DEEPSEEK_API_KEY")
+          elif provider == "anthropic":
+              api_key = os.getenv("ANTHROPIC_API_KEY")
         if model is None:
             model = os.getenv("LLM_MODEL", "deepseek-chat")
 
@@ -124,8 +128,11 @@ class AgentLoop:
         else:
             raise ValueError(f"Unknown provider: {provider}. Use 'deepseek' or 'anthropic'.")
 
-        # Conversation history
+        # Conversation history (short-term memory)
         self.messages: list[dict] = []
+
+        # Long-term memory (ChromaDB-backed, survives restarts)
+        self.memory = get_memory()
 
         # Stats for observability
         self.stats = {
@@ -139,6 +146,15 @@ class AgentLoop:
     def chat(self, user_input: str, verbose: bool = True) -> str:
         """Process a single user message through the Agent Loop."""
         self.messages.append({"role": "user", "content": user_input})
+
+        # ── Pre-fetch relevant memories ──────────
+        relevant = self.memory.recall(user_input, n_results=3)
+        self._memory_context = self.memory.format_for_prompt(relevant)
+        if verbose and self._memory_context:
+            print(f"🧠 Loaded {len(relevant)} relevant memories")
+
+        # ── Final answer (captured for auto-summary) ──
+        final_answer = ""
 
         iteration = 0
         while iteration < self.max_iterations:
@@ -168,7 +184,10 @@ class AgentLoop:
 
             # No tool calls → final answer
             if not tool_calls:
-                return final_text
+                final_answer = final_text
+                # Auto-save important facts to long-term memory
+                self._auto_remember(user_input, final_answer)
+                return final_answer
 
             # ── ACT & OBSERVE ──────────────────
             for tc in tool_calls:
@@ -220,15 +239,37 @@ class AgentLoop:
                         }],
                     })
 
-        return (
+        final_answer = (
             f"⚠️ Reached max iterations ({self.max_iterations}). "
             "The task may be too complex. Try breaking it into smaller steps."
         )
+        self._auto_remember(user_input, final_answer)
+        return final_answer
 
     def reset(self):
         """Clear conversation history and stats."""
         self.messages = []
+        self._memory_context = ""
         self.stats = {"total_iterations": 0, "total_tool_calls": 0, "total_tokens": 0}
+
+    # ── Memory Integration ─────────────────────
+
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt, optionally augmented with relevant memories."""
+        if self._memory_context:
+            return SYSTEM_PROMPT + "\n\n" + self._memory_context
+        return SYSTEM_PROMPT
+
+    def _auto_remember(self, user_input: str, agent_response: str) -> None:
+        """
+        Auto-extract and store important facts after each conversation turn.
+        Uses simple heuristic pattern matching (Phase 1).
+        Phase 2 will use an LLM call for smarter extraction.
+        """
+        try:
+            self.memory.summarize_and_remember(user_input, agent_response)
+        except Exception:
+            pass  # Memory failure should never break the chat
 
     # ── LLM Calls ─────────────────────────────
 
@@ -236,8 +277,8 @@ class AgentLoop:
         """Send conversation to DeepSeek (OpenAI-compatible API)."""
         t0 = time.time()
 
-        # Build messages with system prompt
-        api_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.messages
+        # Build messages with system prompt (includes relevant memories)
+        api_messages = [{"role": "system", "content": self._build_system_prompt()}] + self.messages
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -265,7 +306,7 @@ class AgentLoop:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
+            system=self._build_system_prompt(),
             messages=self.messages,
             tools=TOOL_DEFINITIONS,
         )

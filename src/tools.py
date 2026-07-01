@@ -211,6 +211,44 @@ def get_current_time() -> str:
 
 
 # ──────────────────────────────────────────────
+# Tool: Memory Operations (Phase 1 Week 3)
+# ──────────────────────────────────────────────
+
+def remember_info(text: str, topic: str = "") -> str:
+    """
+    Store important information into long-term memory.
+    Use this when the user explicitly asks you to remember something,
+    or when you learn a fact about the user worth keeping (name, preferences, etc.).
+    """
+    from src.memory import get_memory
+
+    memory = get_memory()
+    metadata = {}
+    if topic:
+        metadata["topic"] = topic
+    mid = memory.remember(text, metadata=metadata)
+    return f"[OK] Stored to memory (id: {mid}). Total memories: {memory.count()}"
+
+
+def recall_info(query: str) -> str:
+    """
+    Search long-term memory for facts relevant to the query.
+    Use this BEFORE answering a question, in case you already know something.
+    """
+    from src.memory import get_memory
+
+    memory = get_memory()
+    results = memory.recall(query, n_results=5)
+    if not results:
+        return "(no relevant memories found)"
+
+    lines = [f"Found {len(results)} relevant memories:"]
+    for i, m in enumerate(results, 1):
+        lines.append(f"{i}. [dist={m['distance']:.3f}] {m['text'][:200]}")
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────
 # Tool Registry — LLM calls tools by name
 # ──────────────────────────────────────────────
 
@@ -315,6 +353,29 @@ TOOL_DEFINITIONS = [
             "required": [],
         },
     },
+    {
+        "name": "remember_info",
+        "description": "Store a fact or piece of information into long-term memory. Use when the user asks you to remember something, or when you learn an important fact about the user (name, preferences, etc.).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The fact or information to remember."},
+                "topic": {"type": "string", "description": "Optional topic tag (e.g. 'personal', 'work', 'pet')."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "recall_info",
+        "description": "Search long-term memory for facts related to a query. Use BEFORE answering questions that might benefit from past context. Returns relevant memories ranked by relevance.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for in memory. Write a descriptive query, not just keywords."},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # 函数名 → 函数对象的映射
@@ -328,6 +389,8 @@ TOOL_MAP = {
     "db_query": db_query,
     "db_exec": db_exec,
     "get_current_time": get_current_time,
+    "remember_info": remember_info,
+    "recall_info": recall_info,
 }
 
 
